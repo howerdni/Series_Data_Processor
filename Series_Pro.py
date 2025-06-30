@@ -259,7 +259,7 @@ with tab2:
     
     with col1:
         unpivot_file = st.file_uploader("上传CSV或Excel文件 (Upload CSV or Excel File)", type=["csv", "xlsx", "xls"], key="unpivot_file")
-        unpivot_sheet_name = st.text_input("工作表名称 (Sheet Name, for Excel)", value="", key="unpivot_sheet_name")
+        unpivot_sheet_name = st ascension_descendant="true" st.text_input("工作表名称 (Sheet Name, for Excel)", value="", key="unpivot_sheet_name")
     
     with col2:
         unpivot_header_cell = st.text_input("表头单元格 (Header Cell, e.g., A5)", value="A5", key="unpivot_header_cell")
@@ -305,11 +305,27 @@ with tab3:
         wind_file = st.file_uploader("上传CSV文件 (Upload CSV File)", type=["csv"], key="wind_file")
         if wind_file:
             try:
-                df = pd.read_csv(wind_file, encoding='gbk')
-                columns = df.columns.tolist()
-                st.write("检测到的列名：", columns)
+                # 尝试多种编码
+                encodings = ['gbk', 'utf-8', 'utf-8-sig']
+                df = None
+                for enc in encodings:
+                    try:
+                        wind_file.seek(0)  # 重置文件指针
+                        df = pd.read_csv(wind_file, encoding=enc)
+                        break
+                    except UnicodeDecodeError:
+                        continue
+                if df is None:
+                    st.error("无法解析 CSV 文件，请检查文件编码 (Cannot parse CSV file, please check encoding)")
+                    columns = []
+                elif df.empty:
+                    st.error("上传的 CSV 文件为空 (Uploaded CSV file is empty)")
+                    columns = []
+                else:
+                    columns = df.columns.tolist()
+                    st.write("检测到的列名：", columns)
             except Exception as e:
-                st.error(f"读取文件失败: {str(e)}")
+                st.error(f"读取文件失败: {str(e)} (Failed to read file: {str(e)})")
                 columns = []
         else:
             columns = []
@@ -319,6 +335,13 @@ with tab3:
         unit_col = st.selectbox("机组编号列", columns, key="wind_unit_col", help="选择机组编号列")
     
     with col2:
+        time_format = st.selectbox(
+            "时间格式 (Time Format)",
+            options=common_formats,
+            index=3,  # 默认选择 '%Y-%m-%d %H:%M:%S'
+            format_func=lambda x: f"{x} (e.g., {datetime.now().strftime(x)})",
+            key="wind_time_format"
+        )
         value_unit = st.selectbox("值列单位", ["kWh", "MWh"], key="wind_value_unit", help="发电量数据的单位")
         total_capacity = st.number_input(
             f"总容量（{value_unit}）",
@@ -353,8 +376,23 @@ with tab3:
     # 验证采样周期
     if wind_file and time_col and unit_col and columns:
         try:
-            df = pd.read_csv(wind_file, encoding='gbk')
-            df[time_col] = pd.to_datetime(df[time_col])
+            wind_file.seek(0)  # 重置文件指针
+            encodings = ['gbk', 'utf-8', 'utf-8-sig']
+            df = None
+            for enc in encodings:
+                try:
+                    df = pd.read_csv(wind_file, encoding=enc)
+                    break
+                except UnicodeDecodeError:
+                    continue
+            if df is None:
+                raise ValueError("无法解析 CSV 文件，请检查文件编码")
+            if df.empty:
+                raise ValueError("CSV 文件为空")
+            df[time_col] = pd.to_datetime(df[time_col], format=time_format, errors='coerce')
+            if df[time_col].isna().any():
+                raise ValueError(f"时间列包含无效格式，请检查时间格式 '{time_format}'")
+            # 按机组和时间排序，计算每个机组的时间差
             df_sorted = df.sort_values([unit_col, time_col])
             time_diff = df_sorted.groupby(unit_col)[time_col].diff().dropna().dt.total_seconds() / 60
             common_period = time_diff.mode()[0] if not time_diff.empty else None
@@ -378,8 +416,22 @@ with tab3:
         else:
             with st.spinner("正在分析数据... (Analyzing data...)"):
                 try:
-                    df = pd.read_csv(wind_file, encoding='gbk')
-                    df[time_col] = pd.to_datetime(df[time_col])
+                    wind_file.seek(0)  # 重置文件指针
+                    encodings = ['gbk', 'utf-8', 'utf-8-sig']
+                    df = None
+                    for enc in encodings:
+                        try:
+                            df = pd.read_csv(wind_file, encoding=enc)
+                            break
+                        except UnicodeDecodeError:
+                            continue
+                    if df is None:
+                        raise ValueError("无法解析 CSV 文件，请检查文件编码")
+                    if df.empty:
+                        raise ValueError("CSV 文件为空")
+                    df[time_col] = pd.to_datetime(df[time_col], format=time_format, errors='coerce')
+                    if df[time_col].isna().any():
+                        raise ValueError(f"时间列包含无效格式，请检查时间格式 '{time_format}'")
                     results_df = calculate_power_rate(
                         df, time_col, value_col, unit_col, value_unit, total_capacity, sample_period, percentile
                     )
