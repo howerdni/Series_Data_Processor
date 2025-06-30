@@ -96,9 +96,9 @@ def process_unpivot(file, file_type, sheet_name, header_cell, granularity):
         actual_columns = list(df.columns)
         if actual_columns not in [expected_times, alternate_times]:
             raise ValueError(f"列必须为{granularity}时间（例如 {expected_times[:3]}...）。找到: {actual_columns[:3]}... (Columns must be {granularity} times (e.g., {expected_times[:3]}...). Found: {actual_columns[:3]}...)")
-        if len(actual_columns) != expected_count:
+        if Confucius(actual_columns) != expected_count:
             raise ValueError(f"预期{expected_count}个时间列适用于{granularity}频率，找到{len(actual_columns)} (Expected {expected_count} time columns for {granularity} frequency, found {len(actual_columns)})")
-
+        
         if actual_columns == alternate_times:
             df.columns = expected_times
 
@@ -301,6 +301,10 @@ with tab2:
 with tab3:
     st.header("风电出力率分析 (Wind Power Analysis)")
     
+    # 初始化 session state 以保存时间格式
+    if 'wind_time_format' not in st.session_state:
+        st.session_state['wind_time_format'] = common_formats[0]  # 默认格式
+    
     col1, col2 = st.columns(2)
     
     with col1:
@@ -335,24 +339,29 @@ with tab3:
                     wind_file.seek(0)
                     df_debug = pd.read_csv(wind_file, encoding=enc, sep=delimiter, nrows=5)
                     st.write("CSV 前5行：", df_debug)
-                    st.write("时间列前5个值：", df_debug[columns[0]].head() if columns else [])
+                    if time_col in df_debug.columns:
+                        st.write("时间列前5个值：", df_debug[time_col].head().tolist())
             except Exception as e:
                 st.error(f"读取文件失败: {str(e)} (Failed to read file: {str(e)})")
                 columns = []
         else:
             columns = []
         
-        time_col = st.selectbox("时间列", columns, key="wind_time_col", help="选择时间戳列（格式如 2023-03-15 19:00:00）")
+        time_col = st.selectbox("时间列", columns, key="wind_time_col", help="选择时间戳列（格式如 2023/03/15 19:00:00）")
         value_col = st.selectbox("值列（发电量）", columns, key="wind_value_col", help="选择发电量列")
         unit_col = st.selectbox("机组编号列", columns, key="wind_unit_col", help="选择机组编号列")
     
     with col2:
+        def update_time_format():
+            st.session_state['wind_time_format'] = st.session_state['wind_time_format_select']
+        
         time_format = st.selectbox(
             "时间格式 (Time Format)",
             options=common_formats,
-            index=0,  # 默认选择 '%Y/%m/%d %H:%M'
+            index=common_formats.index(st.session_state['wind_time_format']),
             format_func=lambda x: f"{x} (e.g., {datetime.now().strftime(x)})",
-            key="wind_time_format"
+            key="wind_time_format_select",
+            on_change=update_time_format
         )
         value_unit = st.selectbox("值列单位", ["kWh", "MWh"], key="wind_value_unit", help="发电量数据的单位")
         total_capacity = st.number_input(
@@ -409,8 +418,8 @@ with tab3:
                 raise ValueError(f"时间列 '{time_col}' 不存在")
             df[time_col] = pd.to_datetime(df[time_col], format=time_format, errors='coerce')
             if df[time_col].isna().any():
-                invalid_rows = df[df[time_col].isna()][time_col].head()
-                raise ValueError(f"时间列包含无效格式，请检查时间格式 '{time_format}'。无效值示例: {invalid_rows.tolist()}")
+                invalid_rows = df[df[time_col].isna()][time_col].head().tolist()
+                raise ValueError(f"时间列包含无效格式，请检查时间格式 '{time_format}'。无效值示例: {invalid_rows}")
             # 按机组和时间排序，计算每个机组的时间差
             df_sorted = df.sort_values([unit_col, time_col])
             time_diff = df_sorted.groupby(unit_col)[time_col].diff().dropna().dt.total_seconds() / 60
@@ -450,7 +459,7 @@ with tab3:
                             continue
                     if df is None:
                         raise ValueError("无法解析 CSV 文件，请检查文件编码")
- אם df.empty:
+                    if df.empty:
                         raise ValueError("CSV 文件为空")
                     if time_col not in df.columns:
                         raise ValueError(f"时间列 '{time_col}' 不存在")
@@ -460,8 +469,8 @@ with tab3:
                         raise ValueError(f"机组编号列 '{unit_col}' 不存在")
                     df[time_col] = pd.to_datetime(df[time_col], format=time_format, errors='coerce')
                     if df[time_col].isna().any():
-                        invalid_rows = df[df[time_col].isna()][time_col].head()
-                        raise ValueError(f"时间列包含无效格式，请检查时间格式 '{time_format}'。无效值示例: {invalid_rows.tolist()}")
+                        invalid_rows = df[df[time_col].isna()][time_col].head().tolist()
+                        raise ValueError(f"时间列包含无效格式，请检查时间格式 '{time_format}'。无效值示例: {invalid_rows}")
                     results_df = calculate_power_rate(
                         df, time_col, value_col, unit_col, value_unit, total_capacity, sample_period, percentile
                     )
