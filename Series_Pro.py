@@ -1,41 +1,176 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import os
-from datetime import datetime
+import cvxpy as cp
+import matplotlib.pyplot as plt
+import io
+from contextlib import redirect_stdout
+from datetime import datetime, timedelta
 import re
+import os
 
-st.set_page_config(page_title="透视表与时间序列转换工具 (Pivot and Unpivot Tool)", layout="wide")
+# 设置 Matplotlib 支持中文显示
+plt.rcParams['font.sans-serif'] = ['SimHei']
+plt.rcParams['axes.unicode_minus'] = False
 
-# 定义常见时间格式供用户选择
-common_formats = [
-    '%Y/%m/%d %H:%M',
-    '%Y-%m-%d %H:%M',
-    '%Y/%m/%d %H:%M:%S',
-    '%Y-%m-%d %H:%M:%S',
-    '%d/%m/%Y %H:%M',
-    '%d-%m-%Y %H:%M',
-    '%Y%m%d %H:%M',
-    '%Y%m%d %H:%M:%S'
-]
+st.set_page_config(page_title="数据分析与负荷预测工具", layout="wide")
 
-# 透视表处理函数
-def process_pivot(file, time_col, data_col, time_format, granularity, agg_method):
-    try:
-        df = pd.read_csv(file)
+class DataAnalysisAndLoadForecastingApp:
+    def __init__(self):
+        self.load_data = None
+        self.time_data = None
+        self.P_forecast_value = None
+        self.pivot_df = None
+        self.unpivot_df = None
+
+    def validate_timeseries(self, timestamps, expected_freq):
+        validation_message = []
+        is_valid = True
+
+        timestamps = timestamps.dropna()
+        if expected_freq == "15T":
+            expected_rows = 23232
+            if len(timestamps) > expected_rows * 1.5 or len(timestamps) < expected_rows * 0.5:
+                is_valid = False
+                validation_message.append(f"意外的行数: {len(timestamps)}。预期约{expected_rows}行，适用于15T频率")
+
+        supported_formats = [
+            "%Y/%m/%d %H:%M:%S",
+            "%Y/%m/%d %H:%M",
+            "%Y-%m-%d %H:%M:%S",
+            "%Y-%m-%d %H:%M",
+        ]
         
+        try:
+            parsed_timestamps = pd.Series([pd.NaT] * len(timestamps))
+            for fmt in supported_formats:
+                temp = pd.to_datetime(timestamps, format=fmt, errors='coerce')
+                parsed_timestamps = parsed_timestamps.fillna(temp)
+            
+            parsed_timestamps = parsed_timestamps.dt.floor('S')
+            
+            if parsed_timestamps.isna().any():
+                invalid_count = parsed_timestamps.isna().sum()
+                is_valid = False
+                validation_message.append(f"{invalid_count}个时间戳无法解析为日期时间")
+            
+            timestamps = parsed_timestamps
+        except Exception as e:
+            is_valid = False
+            validation_message.append(f"解析时间戳失败: {str(e)}")
+            return is_valid, "\n".join(validation_message), timestamps
+
+        duplicates = timestamps[timestamps.duplicated()]
+        if not duplicates.empty:
+            is_valid = False
+            dup_count = len(duplicates)
+            dup_examples = duplicates.head(3).to_list()
+            validation_message.append(f"发现{dup_count}个重复时间戳。示例: {dup_examples}")
+
+        timestamps = timestamps.drop_duplicates()
+        timestamps = timestamps.sort_values()
+        freq = expected_freq
+        try:
+            expected_range = pd.date_range(start=timestamps.min(), end=timestamps.max(), freq=freq)
+        except ValueError as e:
+            is_valid = False
+            validation_message.append(f"无效频率 '{freq}': {str(e)}")
+            return is_valid, "\n".join(validation_message), timestamps
+        
+        if len(timestamps) != len(expected_range):
+            is_valid = False
+            missing = set(expected_range) - set(timestamps)
+            missing_count = len(missing)
+            if missing_count > 0:
+                missing_examples = list(missing)[:3]
+                validation_message.append(f"发现{missing_count}个缺失时间戳。示例: {missing_examples}")
+            if len(timestamps) > len(expected_range):
+                extra_count = len(timestamps) - len(expected_range)
+                validation_message.append(f"发现{extra_count}个超出预期范围的额外时间戳")
+
+        if len(timestamps) > 1:
+            try:
+                timestamp_set = set(timestamps)
+                gaps = []
+                for i in range(1, len(expected_range)):
+                    if expected_range[i] not in timestamp_set:
+                        prev_timestamp = expected_range[i-1]
+                        j = i
+                        while j < len(expected_range) and expected_range[j] not in timestamp_set:
+                            j += 1
+                        next_timestamp = expected_range[j] if j < len(expected_range) else timestamps.max()
+                        gaps.append((prev_timestamp, next_timestamp))
+                        i = j
+                if gaps:
+                    is_valid = False
+                    gap_message = [f"时间序列不连续，频率为{freq}"]
+                    for prev, next_ts in gaps[:3]:
+                        gap_message.append(f"{prev} 和 {next_ts} 之间的间隙")
+                    validation_message.extend(gap_message)
+            except Exception as e:
+                is_valid = False
+                validation_message.append(f"检查连续性时出错: {str(e)}")
+
+        if is_valid:
+            validation_message.append(f"时间序列有效: 所有时间戳均为日期时间格式，频率为{freq}，无缺失或重复条目")
+
+        return is_valid, "\n".join(validation_message), timestamps
+
+    def read_excel_to_dataframe(self, file, sheet_name, header_cell, index_col, data_col, extra_cols, expected_freq):
+        row_number = int(''.join(filter(str.isdigit, header_cell)))
+        df = pd.read_excel(file, sheet_name=sheet_name, header=row_number-1)
+        
+        def to_column_index(col):
+            if isinstance(col, str) and col.isalpha():
+                return ord(col.upper()) - ord('A')
+            return int(col)
+        
+        index_col_idx = to_column_index(index_col)
+        data_col_idx = to_column_index(data_col)
+        extra_col_indices = [to_column_index(col) for col in extra_cols] if extra_cols else []
+        
+        max_col = len(df.columns)
+        for col_idx in [index_col_idx, data_col_idx] + extra_col_indices:
+            if col_idx >= max_col:
+                raise ValueError(f"列索引 {col_idx} 超出可用列数 ({max_col})")
+        
+        time_col_name = df.columns[index_col_idx]
+        data_col_name = df.columns[data_col_idx]
+        extra_col_names = [df.columns[idx] for idx in extra_col_indices]
+        
+        selected_cols = [time_col_name, data_col_name] + extra_col_names
+        df = df[selected_cols]
+        
+        validation_result = self.validate_timeseries(df[time_col_name], expected_freq)
+        is_valid, validation_message, parsed_timestamps = validation_result
+
+        df[time_col_name] = parsed_timestamps
+        df.set_index(time_col_name, inplace=True)
+        df.columns = ['value'] + extra_col_names
+        
+        return df, validation_result
+
+    def process_pivot(self, df, time_col, data_col, time_format, granularity, agg_method):
         if time_col not in df.columns:
-            st.error(f"时间列 '{time_col}' 在CSV中未找到 (Time column '{time_col}' not found in CSV)")
-            return None
+            raise ValueError(f"时间列 '{time_col}' 在CSV中未找到")
         if data_col not in df.columns:
-            st.error(f"数据列 '{data_col}' 在CSV中未找到 (Data column '{data_col}' not found in CSV)")
-            return None
+            raise ValueError(f"数据列 '{data_col}' 在CSV中未找到")
         
         try:
             df[time_col] = pd.to_datetime(df[time_col], format=time_format)
         except ValueError:
-            st.error(f"无法解析时间列，选定的格式 '{time_format}' 不匹配数据 (Failed to parse time column with selected format '{time_format}').")
-            return None
+            common_formats = [
+                '%Y/%m/%d %H:%M', '%Y-%m-%d %H:%M', '%Y/%m/%d %H:%M:%S', '%Y-%m-%d %H:%M:%S',
+                '%d/%m/%Y %H:%M', '%d-%m-%Y %H:%M', '%Y%m%d %H:%M', '%Y%m%d %H:%M:%S'
+            ]
+            for fmt in common_formats:
+                try:
+                    df[time_col] = pd.to_datetime(df[time_col], format=fmt)
+                    break
+                except ValueError:
+                    continue
+            else:
+                raise ValueError("无法解析时间列。请指定正确的时间格式")
         
         df.set_index(time_col, inplace=True)
         
@@ -55,13 +190,8 @@ def process_pivot(file, time_col, data_col, time_format, granularity, agg_method
         pivot_df = resampled.pivot(index='date', columns='time', values=data_col)
         
         return pivot_df
-    except Exception as e:
-        st.error(f"处理透视表失败: {str(e)} (Failed to process pivot: {str(e)})")
-        return None
 
-# 时间序列转换函数
-def process_unpivot(file, file_type, sheet_name, header_cell, granularity):
-    try:
+    def unpivot_to_timeseries(self, file, file_type, sheet_name, header_cell, granularity):
         row_number = int(''.join(filter(str.isdigit, header_cell)))
         col_letter = ''.join(filter(str.isalpha, header_cell)).upper()
         col_number = sum((ord(c) - ord('A') + 1) * (26 ** i) for i, c in enumerate(reversed(col_letter))) - 1
@@ -79,29 +209,25 @@ def process_unpivot(file, file_type, sheet_name, header_cell, granularity):
             unique_dates = set(dates)
             expected_dates = set(pd.date_range(start=min(dates), end=max(dates), freq='D').date)
             if len(unique_dates) != len(expected_dates) or unique_dates != expected_dates:
-                raise ValueError("索引不包含完整一年的唯一每日日期 (Index does not contain exactly one year's worth of unique daily dates).")
+                raise ValueError("索引不包含完整一年的唯一每日日期")
         except ValueError as e:
-            raise ValueError(f"无效日期索引: {str(e)} (Invalid date index: {str(e)})")
+            raise ValueError(f"无效日期索引: {str(e)}")
 
         if granularity == "1h":
-            expected_times = [f"{h}:00" for h in range(24)]
-            alternate_times = [f"0{h}:00" if h < 10 else f"{h}:00" for h in range(24)]
+            expected_times = [f"{h:02d}:00" for h in range(24)]
             expected_count = 24
         else:
             expected_times = [f"{h:02d}:{m:02d}" for h in range(24) for m in range(0, 60, 15)]
             expected_count = 96
 
         actual_columns = list(df.columns)
-        if actual_columns not in [expected_times, alternate_times]:
-            raise ValueError(f"列必须为{granularity}时间（例如 {expected_times[:3]}...）。找到: {actual_columns[:3]}... (Columns must be {granularity} times (e.g., {expected_times[:3]}...). Found: {actual_columns[:3]}...)")
+        if actual_columns != expected_times:
+            raise ValueError(f"列必须为{granularity}时间。找到: {actual_columns[:3]}...")
         if len(actual_columns) != expected_count:
-            raise ValueError(f"预期{expected_count}个时间列适用于{granularity}频率，找到{len(actual_columns)} (Expected {expected_count} time columns for {granularity} frequency, found {len(actual_columns)})")
-
-        if actual_columns == alternate_times:
-            df.columns = expected_times
+            raise ValueError(f"预期{expected_count}个时间列，找到{len(actual_columns)}")
 
         if not df.apply(lambda x: pd.to_numeric(x, errors='coerce').notnull().all()).all():
-            raise ValueError("数据包含非数字值 (Data contains non-numeric values).")
+            raise ValueError("数据包含非数字值")
 
         df_stacked = df.stack().reset_index()
         df_stacked.columns = ['date', 'time', 'value']
@@ -113,305 +239,367 @@ def process_unpivot(file, file_type, sheet_name, header_cell, granularity):
         )
 
         if df_stacked['datetime'].isna().any():
-            raise ValueError("无法解析某些日期时间值 (Failed to parse some datetime values).")
+            raise ValueError("无法解析某些日期时间值")
 
         result_df = df_stacked[['datetime', 'value']].sort_values('datetime')
-
         return result_df
-    except Exception as e:
-        st.error(f"转换为时间序列失败: {str(e)} (Failed to convert to time series: {str(e)})")
-        return None
 
-# 风电出力率分析函数
-def get_season(month):
-    if month in [3, 4, 5]:
-        return '春季'
-    elif month in [6, 7, 8]:
-        return '夏季'
-    elif month in [9, 10, 11]:
-        return '秋季'
-    elif month in [12, 1, 2]:
-        return '冬季'
-    return None
+    def load_and_validate_forecast(self, df, start_pos, time_col, data_col):
+        col_start = ord(start_pos[0].upper()) - ord('A')
+        row_start = int(start_pos[1:]) - 1
+        if row_start < 0 or col_start < 0:
+            raise ValueError("无效的起始位置")
 
-def is_in_time_slot(time, time_slot, sample_period):
-    hour = time.hour
-    if sample_period == 60:
-        if time_slot == '19:00-22:00':
-            return 19 <= hour <= 22
-        elif time_slot == '11:00-14:00':
-            return 11 <= hour <= 14
-        elif time_slot == '1:00-4:00':
-            return 1 <= hour <= 4
-    else:
-        minute = time.minute
-        if time_slot == '19:00-22:00':
-            return (19 <= hour < 22) or (hour == 22 and minute == 0)
-        elif time_slot == '11:00-14:00':
-            return (11 <= hour < 14) or (hour == 14 and minute == 0)
-        elif time_slot == '1:00-4:00':
-            return (1 <= hour < 4) or (hour == 4 and minute == 0)
-    return False
+        df.columns = [chr(ord('A') + i) for i in range(len(df.columns))]
+        df = df.iloc[row_start:]
 
-def calculate_power_rate(df, time_col, value_col, unit_col, value_unit, total_capacity, sample_period, percentile):
-    time_slots = ['19:00-22:00', '11:00-14:00', '1:00-4:00']
-    seasons = ['春季', '夏季', '秋季', '冬季']
-    results = []
-    
-    # 单位转换
-    if value_unit == "MWh":
-        total_capacity_kW = total_capacity * 1000
-        value_to_kW = lambda x: x * 1000
-    else:
-        total_capacity_kW = total_capacity
-        value_to_kW = lambda x: x
-    
-    # 采样周期（小时）
-    period_in_hours = sample_period / 60.0
-    
-    for season in seasons:
-        df_season = df[df[time_col].dt.month.apply(lambda x: get_season(x) == season)]
+        if time_col not in df.columns or data_col not in df.columns:
+            raise ValueError("指定的时间列或数据列不存在")
         
-        for slot in time_slots:
-            df_slot = df_season[df_season[time_col].apply(lambda x: is_in_time_slot(x, slot, sample_period))]
-            
-            if not df_slot.empty:
-                # 聚合多机组数据
-                total_power = df_slot.groupby(time_col)[value_col].sum()
-                
-                if sample_period != 60:
-                    total_power = total_power.resample(f'{sample_period}T').sum()
-                
-                # 转换为功率（kW）
-                total_power = value_to_kW(total_power) / period_in_hours
-                power_rate = total_power / total_capacity_kW
-                sorted_power_rate = power_rate.sort_values(ascending=False)
-                top_percentile = np.percentile(sorted_power_rate, 100 - percentile) if not sorted_power_rate.empty else np.nan
-            else:
-                top_percentile = np.nan
-            
-            results.append({
-                '季节': season,
-                '时段': slot,
-                f'{percentile}%概率出力率': top_percentile
-            })
-    
-    return pd.DataFrame(results)
-
-# 主界面
-st.title("透视表与时间序列转换工具 (Pivot and Unpivot Tool)")
-
-# 创建三个标签页
-tab1, tab2, tab3 = st.tabs(["透视表 (Pivot Table)", "时间序列转换 (Unpivot Time Series)", "风电出力率分析 (Wind Power Analysis)"])
-
-# 透视表标签页
-with tab1:
-    st.header("透视表生成 (Pivot Table Generation)")
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        pivot_file = st.file_uploader("上传CSV文件 (Upload CSV File)", type=["csv"], key="pivot_file")
-        pivot_time_col = st.text_input("时间列名称 (Time Column Name, e.g., Time)", value="Time", key="pivot_time_col")
-        pivot_data_col = st.text_input("数据列名称 (Data Column Name, e.g., value)", value="value", key="pivot_data_col")
-    
-    with col2:
-        pivot_time_format = st.selectbox(
-            "时间格式 (Time Format)",
-            options=common_formats,
-            index=0,
-            format_func=lambda x: f"{x} (e.g., {datetime.now().strftime(x)})",
-            key="pivot_time_format"
-        )
-        pivot_granularity = st.selectbox("时间粒度 (Time Granularity)", options=["15min", "1h"], index=0, key="pivot_granularity")
-        pivot_agg_method = st.selectbox("聚合方法 (Aggregation Method)", options=["average", "max", "min"], index=0, key="pivot_agg_method")
-    
-    if st.button("生成透视表 (Generate Pivot Table)", key="generate_pivot"):
-        if not pivot_file:
-            st.error("请先上传一个CSV文件！(Please upload a CSV file first!)")
-        elif not pivot_time_col or not pivot_data_col:
-            st.error("必须指定时间和数据列名称！(Time and Data column names must be specified!)")
-        else:
-            with st.spinner("正在生成透视表... (Generating pivot table...)"):
-                pivot_df = process_pivot(pivot_file, pivot_time_col, pivot_data_col, pivot_time_format, pivot_granularity, pivot_agg_method)
-                if pivot_df is not None:
-                    st.session_state['pivot_df'] = pivot_df
-                    st.success("透视表生成成功！(Pivot table generated successfully!)")
-    
-    if 'pivot_df' in st.session_state and st.session_state['pivot_df'] is not None:
-        st.subheader("透视表结果 (Pivot Table Result)")
-        st.dataframe(st.session_state['pivot_df'], use_container_width=True)
-    
-        csv = st.session_state['pivot_df'].to_csv(encoding='utf-8-sig')
-        st.download_button(
-            label="保存透视表 (Save Pivot Table)",
-            data=csv,
-            file_name=f"pivot_table_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-            mime="text/csv",
-            key="save_pivot"
-        )
-
-# 时间序列转换标签页
-with tab2:
-    st.header("时间序列转换 (Unpivot Time Series)")
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        unpivot_file = st.file_uploader("上传CSV或Excel文件 (Upload CSV or Excel File)", type=["csv", "xlsx", "xls"], key="unpivot_file")
-        unpivot_sheet_name = st.text_input("工作表名称 (Sheet Name, for Excel)", value="", key="unpivot_sheet_name")
-    
-    with col2:
-        unpivot_header_cell = st.text_input("表头单元格 (Header Cell, e.g., A5)", value="A5", key="unpivot_header_cell")
-        unpivot_granularity = st.selectbox("时间粒度 (Time Granularity)", options=["15min", "1h"], index=0, key="unpivot_granularity")
-    
-    if st.button("转换为时间序列 (Convert to Time Series)", key="generate_unpivot"):
-        if not unpivot_file:
-            st.error("请先上传一个文件！(Please upload a file first!)")
-        elif not unpivot_header_cell:
-            st.error("必须指定表头单元格！(Header cell must be specified!)")
-        elif not re.match(r'^[A-Z]+\d+$', unpivot_header_cell):
-            st.error("表头单元格必须为类似'A5'的格式！(Header cell must be in format like 'A5'!)")
-        elif unpivot_file.name.endswith(('.xlsx', '.xls')) and not unpivot_sheet_name:
-            st.error("Excel文件必须指定工作表名称！(Sheet name must be specified for Excel files!)")
-        else:
-            with st.spinner("正在转换为时间序列... (Converting to time series...)"):
-                file_type = 'excel' if unpivot_file.name.endswith(('.xlsx', '.xls')) else 'csv'
-                unpivot_df = process_unpivot(unpivot_file, file_type, unpivot_sheet_name, unpivot_header_cell, unpivot_granularity)
-                if unpivot_df is not None:
-                    st.session_state['unpivot_df'] = unpivot_df
-                    st.success("时间序列数据生成成功！(Time series data generated successfully!)")
-    
-    if 'unpivot_df' in st.session_state and st.session_state['unpivot_df'] is not None:
-        st.subheader("时间序列结果 (Time Series Result)")
-        st.dataframe(st.session_state['unpivot_df'], use_container_width=True)
-    
-        csv = st.session_state['unpivot_df'].to_csv(index=False, encoding='utf-8-sig')
-        st.download_button(
-            label="保存时间序列 (Save Time Series)",
-            data=csv,
-            file_name=f"time_series_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-            mime="text/csv",
-            key="save_unpivot"
-        )
-
-# 风电出力率分析标签页
-with tab3:
-    st.header("风电出力率分析 (Wind Power Analysis)")
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        wind_file = st.file_uploader("上传CSV文件 (Upload CSV File)", type=["csv"], key="wind_file")
-        if wind_file:
-            try:
-                df = pd.read_csv(wind_file, encoding='gbk')
-                columns = df.columns.tolist()
-                st.write("检测到的列名：", columns)
-            except Exception as e:
-                st.error(f"读取文件失败: {str(e)}")
-                columns = []
-        else:
-            columns = []
+        time_data = pd.to_datetime(df[time_col], errors='coerce')
+        if time_data.isna().any():
+            raise ValueError("时间列包含无效或格式错误的时间")
         
-        time_col = st.selectbox("时间列", columns, key="wind_time_col", help="选择时间戳列（格式如 2023-03-15 19:00:00）")
-        value_col = st.selectbox("值列（发电量）", columns, key="wind_value_col", help="选择发电量列")
-        unit_col = st.selectbox("机组编号列", columns, key="wind_unit_col", help="选择机组编号列")
-    
-    with col2:
-        value_unit = st.selectbox("值列单位", ["kWh", "MWh"], key="wind_value_unit", help="发电量数据的单位")
-        total_capacity = st.number_input(
-            f"总容量（{value_unit}）",
-            min_value=0.0,
-            value=51.0 if value_unit == "MWh" else 51000.0,
-            step=0.1,
-            key="wind_total_capacity",
-            help="输入所有机组的总容量"
+        load_data = pd.to_numeric(df[data_col], errors='coerce')
+        if load_data.isna().any():
+            raise ValueError("负荷数据列包含非数字值")
+
+        start_time = time_data.min()
+        end_time = time_data.max()
+        expected_hours = int((end_time - start_time).total_seconds() / 3600) + 1
+        actual_hours = len(time_data)
+
+        time_diffs = time_data.diff().dropna()
+        non_hourly = time_diffs[time_diffs != timedelta(hours=1)]
+        interval_ok = non_hourly.empty
+
+        interval_details = ""
+        if not non_hourly.empty:
+            interval_details = "非1小时间隔详情:\n"
+            for idx in non_hourly.index:
+                interval_details += f"  介于 {time_data.loc[idx-1]} 和 {time_data.loc[idx]}: {time_diffs.loc[idx]}\n"
+
+        duplicates = time_data.duplicated().sum()
+        maximum = load_data.max()
+        sumofvalue = load_data.sum()
+        minimum = load_data.min()
+
+        result = (
+            f"首时间: {start_time}\n"
+            f"末时间: {end_time}\n"
+            f"时间间隔: {'1小时' if interval_ok else '存在非1小时间距'}\n"
+            f"{interval_details if interval_details else ''}"
+            f"预期数据点: {expected_hours}\n"
+            f"实际数据点: {actual_hours}\n"
+            f"重复时间点: {duplicates}\n"
+            f"最大值: {maximum}\n"
+            f"求和: {sumofvalue}\n"
+            f"最小值: {minimum}\n"
         )
-        sample_period_options = {
-            "1小时": 60,
-            "30分钟": 30,
-            "15分钟": 15
-        }
-        sample_period_label = st.selectbox(
-            "采样周期",
-            list(sample_period_options.keys()),
-            key="wind_sample_period",
-            help="选择数据的时间间隔"
-        )
-        sample_period = sample_period_options[sample_period_label]
-        percentile = st.number_input(
-            "分位数（%）",
-            min_value=0.0,
-            max_value=100.0,
-            value=5.0,
-            step=0.1,
-            key="wind_percentile",
-            help="例如，5 表示前5%分位出力率"
-        )
-    
-    # 验证采样周期
-    if wind_file and time_col and unit_col and columns:
-        try:
-            df = pd.read_csv(wind_file, encoding='gbk')
-            df[time_col] = pd.to_datetime(df[time_col])
-            df_sorted = df.sort_values([unit_col, time_col])
-            time_diff = df_sorted.groupby(unit_col)[time_col].diff().dropna().dt.total_seconds() / 60
-            common_period = time_diff.mode()[0] if not time_diff.empty else None
-            if common_period and abs(common_period - sample_period) > 1e-6:
-                st.warning(
-                    f"检测到数据采样周期约为 {int(common_period)} 分钟，"
-                    f"与选择的 {sample_period_label}（{sample_period} 分钟）不匹配，请确认！"
-                )
-            else:
-                st.info(f"采样周期验证通过：约为 {sample_period} 分钟")
-        except Exception as e:
-            st.error(f"时间列格式错误: {str(e)}")
-    
-    if st.button("运行分析 (Run Analysis)", key="wind_analyze"):
-        if not wind_file:
-            st.error("请先上传一个CSV文件！(Please upload a CSV file first!)")
-        elif not time_col or not value_col or not unit_col:
-            st.error("必须选择时间列、值列和机组编号列！(Time, value, and unit columns must be selected!)")
-        elif total_capacity <= 0:
-            st.error("总容量必须大于0！(Total capacity must be greater than 0!)")
+        
+        return load_data, time_data, result, interval_ok, actual_hours, expected_hours, duplicates
+
+    def run_optimization(self, load_data, time_data, P_max_forecast, E_total_forecast, delta):
+        P_max_current = np.max(load_data)
+        E_total_current = np.sum(load_data)
+        P_min = np.min(load_data)
+        P_min_new = P_min * (1 + delta)
+        n_hours = len(load_data)
+
+        if E_total_forecast < n_hours * P_min_new:
+            raise ValueError(f"总电量 {E_total_forecast} MWh 不足以满足最小负荷约束 {n_hours * P_min_new} MWh")
+        if E_total_forecast > n_hours * P_max_forecast:
+            raise ValueError(f"总电量 {E_total_forecast} MWh 超出最大负荷约束 {n_hours * P_max_forecast} MWh")
+        if P_min_new >= P_max_forecast:
+            raise ValueError(f"调整后的最小负荷 {P_min_new} MW 不能大于或等于预测最大负荷 {P_max_forecast} MW")
+
+        annual_avg_load = E_total_forecast / n_hours
+
+        scale_factor = 1000
+        load_data_scaled = load_data / scale_factor
+        P_max_current_scaled = P_max_current / scale_factor
+        P_max_forecast_scaled = P_max_forecast / scale_factor
+        E_total_forecast_scaled = E_total_forecast / scale_factor
+        P_min_new_scaled = P_min_new / scale_factor
+
+        P_scaled = load_data_scaled * (P_max_forecast_scaled / P_max_current_scaled)
+
+        P_forecast = cp.Variable(n_hours)
+
+        objective = cp.Minimize(cp.sum_squares((P_forecast - P_scaled) / P_scaled))
+
+        max_load_idx = np.argmax(load_data)
+        constraints = [
+            P_forecast[max_load_idx] >= P_max_forecast_scaled * 0.99,
+            P_forecast[max_load_idx] <= P_max_forecast_scaled * 1.01,
+            P_forecast <= P_max_forecast_scaled,
+            cp.sum(P_forecast) == E_total_forecast_scaled,
+            P_forecast >= P_min_new_scaled,
+            P_forecast >= 0
+        ]
+
+        solver_output = io.StringIO()
+        solver_status = None
+        P_forecast_value = None
+
+        with redirect_stdout(solver_output):
+            problem = cp.Problem(objective, constraints)
+            problem.solve(solver=cp.ECOS, verbose=True)
+            P_forecast_value = P_forecast.value
+            solver_status = problem.status
+
+        ecos_output = solver_output.getvalue()
+        solver_output.truncate(0)
+        solver_output.seek(0)
+
+        if P_forecast_value is None:
+            ecos_output += "\nECOS失败，尝试SCS...\n"
+            with redirect_stdout(solver_output):
+                P_min_new_scaled = P_min * (1 + delta / 2) / scale_factor
+                constraints[-2] = P_forecast >= P_min_new_scaled
+                problem = cp.Problem(objective, constraints)
+                problem.solve(solver=cp.SCS, verbose=True)
+                P_forecast_value = P_forecast.value
+                solver_status = problem.status
+            scs_output = solver_output.getvalue()
+            solver_output = ecos_output + scs_output
         else:
-            with st.spinner("正在分析数据... (Analyzing data...)"):
-                try:
-                    df = pd.read_csv(wind_file, encoding='gbk')
-                    df[time_col] = pd.to_datetime(df[time_col])
-                    results_df = calculate_power_rate(
-                        df, time_col, value_col, unit_col, value_unit, total_capacity, sample_period, percentile
-                    )
-                    st.session_state['wind_df'] = results_df
-                    st.success("分析完成！(Analysis completed!)")
-                except Exception as e:
-                    st.error(f"分析失败: {str(e)}")
-    
-    if 'wind_df' in st.session_state and st.session_state['wind_df'] is not None:
-        st.subheader("分析结果 (Analysis Result)")
-        st.dataframe(
-            st.session_state['wind_df'].style.format({f'{percentile}%概率出力率': '{:.4f}'}, na_rep='无有效数据'),
-            use_container_width=True
-        )
-        csv = st.session_state['wind_df'].to_csv(index=False, encoding='utf-8-sig')
-        st.download_button(
-            label="保存结果 (Save Results)",
-            data=csv,
-            file_name=f"wind_power_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-            mime="text/csv",
-            key="save_wind"
+            solver_output = ecos_output
+
+        if P_forecast_value is None:
+            raise ValueError("优化失败：无法找到可行解，请检查参数或约束")
+
+        P_forecast_value = P_forecast_value * scale_factor
+
+        result = (
+            f"优化算法计算结果:\n"
+            f"1. 输入参数:\n"
+            f"   - 当前最大负荷: {P_max_current:.2f} MW\n"
+            f"   - 当前总电量: {E_total_current:.2f} MWh\n"
+            f"   - 当前最小负荷: {P_min:.2f} MW\n"
+            f"   - 预测最大负荷: {P_max_forecast:.2f} MW\n"
+            f"   - 预测总电量: {E_total_forecast:.2f} MWh\n"
+            f"   - 最小负荷增益率: {delta*100:.2f}%\n"
+            f"   - 新最小负荷约束: {P_min_new:.2f} MW\n"
+            f"   - 年平均负荷: {annual_avg_load:.2f} MW\n"
+            f"   - 数据点数: {n_hours}\n"
+            f"2. 优化目标:\n"
+            f"   - 最小化预测负荷与缩放负荷的相对平方误差和\n"
+            f"3. 约束条件:\n"
+            f"   - 最大负荷点接近 P_max_forecast (±1%): {P_max_forecast_scaled*0.99*scale_factor:.2f} MW ≤ P[{max_load_idx}] ≤ {P_max_forecast_scaled*1.01*scale_factor:.2f} MW\n"
+            f"   - 所有负荷 ≤ P_max_forecast: {P_max_forecast:.2f} MW\n"
+            f"   - 总电量 = E_total_forecast: {E_total_forecast:.2f} MWh\n"
+            f"   - 所有负荷 ≥ P_min_new: {P_min_new:.2f} MW\n"
+            f"   - 所有负荷 ≥ 0 MW\n"
+            f"4. CVXPY 求解器日志:\n{solver_output}\n"
+            f"5. 求解状态: {solver_status}\n"
+            f"6. 输出结果:\n"
+            f"   - 预测最大负荷: {np.max(P_forecast_value):.2f} MW\n"
+            f"   - 预测总电量: {np.sum(P_forecast_value):.2f} MWh\n"
+            f"   - 预测最小负荷: {np.min(P_forecast_value):.2f} MW\n"
+            f"优化完成！\n"
         )
 
-st.markdown("""
----
-**关于 (About)**  
-欢迎使用透视表与时间序列转换工具！此工具支持以下功能：  
-- **透视表**：将时间序列数据转换为透视表，按时间粒度（15分钟或1小时）聚合数据（平均、最大、最小），支持多种时间格式选择。  
-- **时间序列转换**：将透视表格式数据转换为时间序列，支持CSV和Excel输入。  
-- **风电出力率分析**：分析风电数据，计算各季节（春季、夏季、秋季、冬季）在特定时段（19:00-22:00、11:00-14:00、1:00-4:00）的指定分位出力率，支持多机组数据和不同采样周期（1小时、30分钟、15分钟）。  
-(Welcome to the Pivot and Unpivot Tool! This tool supports the following features:  
-- **Pivot Table**: Convert time series data into pivot tables, aggregating data (average, max, min) by time granularity (15 minutes or 1 hour), with multiple time format options.  
-- **Unpivot Time Series**: Convert pivot table data to time series, supporting CSV and Excel inputs.  
-- **Wind Power Analysis**: Analyze wind power data to calculate percentile power rates for seasons (spring, summer, autumn, winter) in specific time slots (19:00-22:00, 11:00-14:00, 1:00-4:00), supporting multi-unit data and various sampling periods (1 hour, 30 minutes, 15 minutes).)
-""")
+        fig, ax = plt.subplots(figsize=(8, 5))
+        ax.plot(time_data, load_data, label='初始负荷数据 (MW)', color='blue', alpha=0.7)
+        ax.plot(time_data, P_forecast_value, label='预测负荷数据 (MW)', color='red', linestyle='--', alpha=0.7)
+        ax.set_xlabel('时间')
+        ax.set_ylabel('负荷 (MW)')
+        ax.set_title('初始与预测负荷对比')
+        ax.legend()
+        ax.grid(True)
+
+        return P_forecast_value, result, fig
+
+    def main(self):
+        st.title("数据分析与负荷预测工具 (Data Analysis and Load Forecasting Tool)")
+
+        tabs = st.tabs(["数据提取", "透视分析", "时间序列转换", "负荷预测", "关于"])
+
+        with tabs[0]:  # 数据提取
+            st.header("数据提取 (Data Extraction)")
+            uploaded_file = st.file_uploader("选择Excel文件", type=['xlsx', 'xls'])
+            sheet_name = st.text_input("工作表名称", value="")
+            header_cell = st.text_input("表头单元格 (e.g., A5)", value="")
+            index_col = st.text_input("索引列 (e.g., B or 2)", value="")
+            data_col = st.text_input("数据列 (e.g., C or 3)", value="")
+            extra_cols = st.text_input("额外列 (e.g., B,C,E or 2,3,5)", value="")
+            expected_freq = st.selectbox("预期频率", ["H", "15T", "5T", "30T"], index=0)
+
+            if st.button("处理文件"):
+                if not uploaded_file:
+                    st.error("请先选择一个文件！")
+                elif not all([sheet_name, header_cell, index_col, data_col]):
+                    st.error("工作表、表头、索引和数据字段必须填写！")
+                elif not re.match(r'^[A-Z]+\d+$', header_cell):
+                    st.error("表头单元格必须为类似'A5'的格式！")
+                else:
+                    extra_cols_list = [col.strip() for col in extra_cols.split(',')] if extra_cols else []
+                    try:
+                        df, validation_result = self.read_excel_to_dataframe(
+                            uploaded_file, sheet_name, header_cell, index_col, data_col, extra_cols_list, expected_freq
+                        )
+                        is_valid, validation_message, _ = validation_result
+                        st.text_area("时间序列验证结果", validation_message, height=200)
+                        if is_valid:
+                            st.success("时间序列有效！")
+                        else:
+                            st.warning("检测到时间序列问题，请检查验证结果。")
+                        
+                        st.dataframe(df)
+                        csv = df.to_csv(index=True, encoding='utf-8-sig')
+                        st.download_button(
+                            label="下载处理结果 (CSV)",
+                            data=csv,
+                            file_name="output.csv",
+                            mime="text/csv"
+                        )
+                    except Exception as e:
+                        st.error(f"处理文件失败: {str(e)}")
+
+        with tabs[1]:  # 透视分析
+            st.header("透视分析 (Pivot Analysis)")
+            uploaded_file = st.file_uploader("选择CSV文件", type=['csv'], key="pivot")
+            time_col = st.text_input("时间列名称 (e.g., Time)", value="Time")
+            data_col = st.text_input("数据列名称 (e.g., value)", value="value")
+            time_format = st.text_input("时间格式 (e.g., %Y/%m/%d %H:%M)", value="%Y/%m/%d %H:%M")
+            granularity = st.selectbox("时间粒度", ["15min", "1h"], index=0)
+            agg_method = st.selectbox("聚合方法", ["average", "max", "min"], index=0)
+
+            if st.button("生成透视表"):
+                if not uploaded_file:
+                    st.error("请先选择一个CSV文件！")
+                elif not all([time_col, data_col]):
+                    st.error("必须指定时间和数据列名称！")
+                else:
+                    try:
+                        df = pd.read_csv(uploaded_file)
+                        self.pivot_df = self.process_pivot(df, time_col, data_col, time_format, granularity, agg_method)
+                        st.dataframe(self.pivot_df)
+                        st.success("透视表生成成功！")
+                        csv = self.pivot_df.to_csv(index=True, encoding='utf-8-sig')
+                        st.download_button(
+                            label="下载透视表 (CSV)",
+                            data=csv,
+                            file_name="pivot_table.csv",
+                            mime="text/csv"
+                        )
+                    except Exception as e:
+                        st.error(f"处理透视表失败: {str(e)}")
+
+        with tabs[2]:  # 时间序列转换
+            st.header("时间序列转换 (Unpivot Time Series)")
+            uploaded_file = st.file_uploader("选择CSV或Excel文件", type=['csv', 'xlsx', 'xls'], key="unpivot")
+            file_type = 'csv' if uploaded_file and uploaded_file.name.endswith('.csv') else 'excel'
+            sheet_name = st.text_input("工作表名称 (仅Excel)", value="", disabled=file_type=='csv')
+            header_cell = st.text_input("表头单元格 (e.g., A5)", value="")
+            granularity = st.selectbox("时间粒度", ["15min", "1h"], index=1, key="unpivot_granularity")
+
+            if st.button("转换为时间序列"):
+                if not uploaded_file:
+                    st.error("请先选择一个文件！")
+                elif not header_cell:
+                    st.error("必须指定表头单元格！")
+                elif not re.match(r'^[A-Z]+\d+$', header_cell):
+                    st.error("表头单元格必须为类似'A5'的格式！")
+                elif file_type == 'excel' and not sheet_name:
+                    st.error("Excel文件必须指定工作表名称！")
+                else:
+                    try:
+                        self.unpivot_df = self.unpivot_to_timeseries(uploaded_file, file_type, sheet_name, header_cell, granularity)
+                        st.dataframe(self.unpivot_df)
+                        st.success("时间序列数据生成成功！")
+                        csv = self.unpivot_df.to_csv(index=False, encoding='utf-8-sig')
+                        st.download_button(
+                            label="下载时间序列 (CSV)",
+                            data=csv,
+                            file_name="timeseries.csv",
+                            mime="text/csv"
+                        )
+                    except Exception as e:
+                        st.error(f"转换为时间序列失败: {str(e)}")
+
+        with tabs[3]:  # 负荷预测
+            st.header("负荷预测 (Load Forecasting)")
+            uploaded_file = st.file_uploader("选择CSV文件", type=['csv'], key="forecast")
+            start_pos = st.text_input("表格起始位置 (e.g., A1)", value="A1")
+            time_col = st.text_input("时间列标签 (e.g., B)", value="B")
+            data_col = st.text_input("负荷数据列 (e.g., C)", value="C")
+
+            if st.button("加载并验证数据"):
+                if not uploaded_file:
+                    st.error("请先选择CSV文件！")
+                else:
+                    try:
+                        df = pd.read_csv(uploaded_file)
+                        self.load_data, self.time_data, result, interval_ok, actual_hours, expected_hours, duplicates = self.load_and_validate_forecast(df, start_pos, time_col, data_col)
+                        st.text_area("验证结果", result, height=200)
+                        if not interval_ok:
+                            st.warning("时间序列应具有1小时间距！")
+                        if actual_hours != expected_hours:
+                            st.warning(f"数据点数量不匹配！预期 {expected_hours}，实际 {actual_hours}")
+                        if duplicates > 0:
+                            st.warning(f"发现 {duplicates} 个重复时间点！")
+                    except Exception as e:
+                        st.error(f"加载或验证失败: {str(e)}")
+
+            st.subheader("预测参数")
+            P_max_forecast = st.number_input("预测年份最大负荷 (MW)", min_value=0.0, step=0.1)
+            E_total_forecast = st.number_input("预测年份总电量 (MWh)", min_value=0.0, step=0.1)
+            delta = st.number_input("最小负荷增益率 (%)", min_value=0.0, step=0.1) / 100
+
+            if st.button("运行优化"):
+                if self.load_data is None or self.time_data is None:
+                    st.error("请先加载并验证数据！")
+                else:
+                    try:
+                        self.P_forecast_value, result, fig = self.run_optimization(self.load_data, self.time_data, P_max_forecast, E_total_forecast, delta)
+                        st.text_area("优化结果", result, height=400)
+                        st.pyplot(fig)
+                        df = pd.DataFrame({
+                            "小时": np.arange(1, len(self.P_forecast_value) + 1),
+                            "预测负荷_MW": self.P_forecast_value
+                        })
+                        csv = df.to_csv(index=False, encoding='utf-8-sig')
+                        st.download_button(
+                            label="下载预测结果 (CSV)",
+                            data=csv,
+                            file_name="forecast_results.csv",
+                            mime="text/csv"
+                        )
+                    except Exception as e:
+                        st.error(f"优化失败: {str(e)}")
+
+        with tabs[4]:  # 关于
+            st.header("关于 (About)")
+            about_info = (
+                "数据分析与负荷预测工具简介\n\n"
+                "欢迎使用数据分析与负荷预测工具，这是一款集成了数据处理、分析和电力负荷预测功能的综合性软件，旨在为用户提供高效、便捷的数据管理与预测解决方案。\n"
+                "功能概述:\n"
+                "1. 数据提取: 从Excel文件中提取时间序列数据，支持自定义表头、索引列和数据列。\n"
+                "2. 透视分析: 将时间序列数据转换为透视表，支持按时间粒度（15分钟或1小时）进行聚合。\n"
+                "3. 时间序列转换: 将透视表格式的数据转换回时间序列格式。\n"
+                "4. 负荷预测: 基于历史负荷数据进行未来负荷预测，使用凸优化算法。\n"
+                "开发者信息:\n"
+                " 开发者: 倪程捷 (Chengjie Ni)\n"
+                " 职位: 高级工程师，中电顾问华东电力设计院有限公司\n"
+                " 邮箱: chengjie_ni@163.com\n"
+                "版本信息:\n"
+                "   - 当前版本: 1.0\n"
+                "   - 发布日期: 2025年6月\n"
+            )
+            st.text_area("关于", about_info, height=400)
+
+if __name__ == "__main__":
+    try:
+        import pandas
+        import openpyxl
+        import cvxpy
+        import numpy
+        import matplotlib
+    except ImportError:
+        st.error("请先安装所需包: pip install pandas openpyxl cvxpy numpy matplotlib streamlit")
+        exit(1)
+
+    app = DataAnalysisAndLoadForecastingApp()
+    app.main()
