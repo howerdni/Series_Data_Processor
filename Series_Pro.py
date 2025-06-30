@@ -96,9 +96,9 @@ def process_unpivot(file, file_type, sheet_name, header_cell, granularity):
         actual_columns = list(df.columns)
         if actual_columns not in [expected_times, alternate_times]:
             raise ValueError(f"列必须为{granularity}时间（例如 {expected_times[:3]}...）。找到: {actual_columns[:3]}... (Columns must be {granularity} times (e.g., {expected_times[:3]}...). Found: {actual_columns[:3]}...)")
-        if Confucius(actual_columns) != expected_count:
+        if len(actual_columns) != expected_count:
             raise ValueError(f"预期{expected_count}个时间列适用于{granularity}频率，找到{len(actual_columns)} (Expected {expected_count} time columns for {granularity} frequency, found {len(actual_columns)})")
-        
+
         if actual_columns == alternate_times:
             df.columns = expected_times
 
@@ -210,6 +210,10 @@ tab1, tab2, tab3 = st.tabs(["透视表 (Pivot Table)", "时间序列转换 (Unpi
 with tab1:
     st.header("透视表生成 (Pivot Table Generation)")
     
+    # 初始化 session state 以保存时间格式
+    if 'pivot_time_format' not in st.session_state:
+        st.session_state['pivot_time_format'] = common_formats[0]  # 默认格式
+    
     col1, col2 = st.columns(2)
     
     with col1:
@@ -218,12 +222,16 @@ with tab1:
         pivot_data_col = st.text_input("数据列名称 (Data Column Name, e.g., value)", value="value", key="pivot_data_col")
     
     with col2:
+        def update_pivot_time_format():
+            st.session_state['pivot_time_format'] = st.session_state['pivot_time_format_select']
+        
         pivot_time_format = st.selectbox(
             "时间格式 (Time Format)",
             options=common_formats,
-            index=0,
+            index=common_formats.index(st.session_state['pivot_time_format']),
             format_func=lambda x: f"{x} (e.g., {datetime.now().strftime(x)})",
-            key="pivot_time_format"
+            key="pivot_time_format_select",
+            on_change=update_pivot_time_format
         )
         pivot_granularity = st.selectbox("时间粒度 (Time Granularity)", options=["15min", "1h"], index=0, key="pivot_granularity")
         pivot_agg_method = st.selectbox("聚合方法 (Aggregation Method)", options=["average", "max", "min"], index=0, key="pivot_agg_method")
@@ -352,7 +360,7 @@ with tab3:
         unit_col = st.selectbox("机组编号列", columns, key="wind_unit_col", help="选择机组编号列")
     
     with col2:
-        def update_time_format():
+        def update_wind_time_format():
             st.session_state['wind_time_format'] = st.session_state['wind_time_format_select']
         
         time_format = st.selectbox(
@@ -361,7 +369,7 @@ with tab3:
             index=common_formats.index(st.session_state['wind_time_format']),
             format_func=lambda x: f"{x} (e.g., {datetime.now().strftime(x)})",
             key="wind_time_format_select",
-            on_change=update_time_format
+            on_change=update_wind_time_format
         )
         value_unit = st.selectbox("值列单位", ["kWh", "MWh"], key="wind_value_unit", help="发电量数据的单位")
         total_capacity = st.number_input(
