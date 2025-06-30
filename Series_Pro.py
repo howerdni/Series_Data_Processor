@@ -4,6 +4,8 @@ import numpy as np
 import os
 from datetime import datetime
 import re
+import csv
+import io
 
 st.set_page_config(page_title="透视表与时间序列转换工具 (Pivot and Unpivot Tool)", layout="wide")
 
@@ -259,7 +261,7 @@ with tab2:
     
     with col1:
         unpivot_file = st.file_uploader("上传CSV或Excel文件 (Upload CSV or Excel File)", type=["csv", "xlsx", "xls"], key="unpivot_file")
-        unpivot_sheet_name = st ascension_descendant="true" st.text_input("工作表名称 (Sheet Name, for Excel)", value="", key="unpivot_sheet_name")
+        unpivot_sheet_name = st.text_input("工作表名称 (Sheet Name, for Excel)", value="", key="unpivot_sheet_name")
     
     with col2:
         unpivot_header_cell = st.text_input("表头单元格 (Header Cell, e.g., A5)", value="A5", key="unpivot_header_cell")
@@ -305,25 +307,34 @@ with tab3:
         wind_file = st.file_uploader("上传CSV文件 (Upload CSV File)", type=["csv"], key="wind_file")
         if wind_file:
             try:
+                # 检测分隔符
+                wind_file.seek(0)
+                sample = wind_file.read(1024).decode('utf-8', errors='ignore')
+                wind_file.seek(0)
+                sniffer = csv.Sniffer()
+                delimiter = sniffer.sniff(sample).delimiter
+                
                 # 尝试多种编码
                 encodings = ['gbk', 'utf-8', 'utf-8-sig']
                 df = None
                 for enc in encodings:
                     try:
-                        wind_file.seek(0)  # 重置文件指针
-                        df = pd.read_csv(wind_file, encoding=enc)
+                        wind_file.seek(0)
+                        df = pd.read_csv(wind_file, encoding=enc, sep=delimiter)
                         break
                     except UnicodeDecodeError:
                         continue
                 if df is None:
-                    st.error("无法解析 CSV 文件，请检查文件编码 (Cannot parse CSV file, please check encoding)")
-                    columns = []
-                elif df.empty:
-                    st.error("上传的 CSV 文件为空 (Uploaded CSV file is empty)")
-                    columns = []
-                else:
-                    columns = df.columns.tolist()
-                    st.write("检测到的列名：", columns)
+                    raise ValueError("无法解析 CSV 文件，请检查文件编码")
+                if df.empty:
+                    raise ValueError("上传的 CSV 文件为空")
+                columns = df.columns.tolist()
+                st.write("检测到的列名：", columns)
+                # 显示文件前几行
+                if st.checkbox("显示 CSV 内容调试信息", key="wind_debug"):
+                    wind_file.seek(0)
+                    df_debug = pd.read_csv(wind_file, encoding=enc, sep=delimiter, nrows=5)
+                    st.write("CSV 前5行：", df_debug)
             except Exception as e:
                 st.error(f"读取文件失败: {str(e)} (Failed to read file: {str(e)})")
                 columns = []
@@ -376,12 +387,16 @@ with tab3:
     # 验证采样周期
     if wind_file and time_col and unit_col and columns:
         try:
-            wind_file.seek(0)  # 重置文件指针
+            wind_file.seek(0)
+            sample = wind_file.read(1024).decode('utf-8', errors='ignore')
+            wind_file.seek(0)
+            sniffer = csv.Sniffer()
+            delimiter = sniffer.sniff(sample).delimiter
             encodings = ['gbk', 'utf-8', 'utf-8-sig']
             df = None
             for enc in encodings:
                 try:
-                    df = pd.read_csv(wind_file, encoding=enc)
+                    df = pd.read_csv(wind_file, encoding=enc, sep=delimiter)
                     break
                 except UnicodeDecodeError:
                     continue
@@ -416,12 +431,16 @@ with tab3:
         else:
             with st.spinner("正在分析数据... (Analyzing data...)"):
                 try:
-                    wind_file.seek(0)  # 重置文件指针
+                    wind_file.seek(0)
+                    sample = wind_file.read(1024).decode('utf-8', errors='ignore')
+                    wind_file.seek(0)
+                    sniffer = csv.Sniffer()
+                    delimiter = sniffer.sniff(sample).delimiter
                     encodings = ['gbk', 'utf-8', 'utf-8-sig']
                     df = None
                     for enc in encodings:
                         try:
-                            df = pd.read_csv(wind_file, encoding=enc)
+                            df = pd.read_csv(wind_file, encoding=enc, sep=delimiter)
                             break
                         except UnicodeDecodeError:
                             continue
