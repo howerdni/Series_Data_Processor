@@ -319,20 +319,13 @@ with tab3:
         wind_file = st.file_uploader("上传CSV文件 (Upload CSV File)", type=["csv"], key="wind_file")
         if wind_file:
             try:
-                # 检测分隔符
-                wind_file.seek(0)
-                sample = wind_file.read(1024).decode('utf-8', errors='ignore')
-                wind_file.seek(0)
-                sniffer = csv.Sniffer()
-                delimiter = sniffer.sniff(sample).delimiter
-                
                 # 尝试多种编码
                 encodings = ['gbk', 'utf-8', 'utf-8-sig']
                 df = None
                 for enc in encodings:
                     try:
                         wind_file.seek(0)
-                        df = pd.read_csv(wind_file, encoding=enc, sep=delimiter)
+                        df = pd.read_csv(wind_file, encoding=enc)
                         break
                     except UnicodeDecodeError:
                         continue
@@ -345,7 +338,7 @@ with tab3:
                 # 显示文件前几行
                 if st.checkbox("显示 CSV 内容调试信息", key="wind_debug"):
                     wind_file.seek(0)
-                    df_debug = pd.read_csv(wind_file, encoding=enc, sep=delimiter, nrows=5)
+                    df_debug = pd.read_csv(wind_file, encoding=enc, nrows=5)
                     st.write("CSV 前5行：", df_debug)
                     if time_col in df_debug.columns:
                         st.write("时间列前5个值：", df_debug[time_col].head().tolist())
@@ -406,15 +399,11 @@ with tab3:
     if wind_file and time_col and unit_col and columns:
         try:
             wind_file.seek(0)
-            sample = wind_file.read(1024).decode('utf-8', errors='ignore')
-            wind_file.seek(0)
-            sniffer = csv.Sniffer()
-            delimiter = sniffer.sniff(sample).delimiter
             encodings = ['gbk', 'utf-8', 'utf-8-sig']
             df = None
             for enc in encodings:
                 try:
-                    df = pd.read_csv(wind_file, encoding=enc, sep=delimiter)
+                    df = pd.read_csv(wind_file, encoding=enc)
                     break
                 except UnicodeDecodeError:
                     continue
@@ -453,15 +442,11 @@ with tab3:
             with st.spinner("正在分析数据... (Analyzing data...)"):
                 try:
                     wind_file.seek(0)
-                    sample = wind_file.read(1024).decode('utf-8', errors='ignore')
-                    wind_file.seek(0)
-                    sniffer = csv.Sniffer()
-                    delimiter = sniffer.sniff(sample).delimiter
                     encodings = ['gbk', 'utf-8', 'utf-8-sig']
                     df = None
                     for enc in encodings:
                         try:
-                            df = pd.read_csv(wind_file, encoding=enc, sep=delimiter)
+                            df = pd.read_csv(wind_file, encoding=enc)
                             break
                         except UnicodeDecodeError:
                             continue
