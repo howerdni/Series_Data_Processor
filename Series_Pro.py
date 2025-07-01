@@ -126,6 +126,8 @@ def process_unpivot(file, file_type, sheet_name, header_cell, granularity):
 
 # 风电出力率分析函数
 def get_season(month):
+    if month == '全年':
+        return '全年'
     if month in [3, 4, 5]:
         return '春季'
     elif month in [6, 7, 8]:
@@ -157,7 +159,7 @@ def is_in_time_slot(time, time_slot, sample_period):
 
 def calculate_power_rate(df, time_col, value_col, unit_col, value_unit, total_capacity, sample_period, percentile):
     time_slots = ['19:00-22:00', '11:00-14:00', '1:00-4:00']
-    seasons = ['春季', '夏季', '秋季', '冬季']
+    seasons = ['春季', '夏季', '秋季', '冬季', '全年']
     results = []
     
     # 单位转换
@@ -172,7 +174,10 @@ def calculate_power_rate(df, time_col, value_col, unit_col, value_unit, total_ca
     period_in_hours = sample_period / 60.0
     
     for season in seasons:
-        df_season = df[df[time_col].dt.month.apply(lambda x: get_season(x) == season)]
+        if season == '全年':
+            df_season = df
+        else:
+            df_season = df[df[time_col].dt.month.apply(lambda x: get_season(x) == season)]
         
         for slot in time_slots:
             df_slot = df_season[df_season[time_col].apply(lambda x: is_in_time_slot(x, slot, sample_period))]
@@ -376,7 +381,7 @@ with tab3:
         total_capacity = st.number_input(
             f"总容量（{value_unit}）",
             min_value=0.0,
-            value=51.0 if value_unit == "MWh" else 51000.0,
+            value=22.719 if value_unit == "MWh" else 22719.0,
             step=0.1,
             key="wind_total_capacity",
             help="输入所有机组的总容量"
@@ -484,6 +489,11 @@ with tab3:
                         df, time_col, value_col, unit_col, value_unit, total_capacity, sample_period, percentile
                     )
                     st.session_state['wind_df'] = results_df
+                    # 调试 CSV 输出
+                    if st.checkbox("调试 CSV 输出内容", key="wind_csv_debug"):
+                        csv_debug = results_df.to_csv(index=False, encoding='utf-8-sig')
+                        st.text("CSV 输出内容预览（前1000字符）：")
+                        st.text(csv_debug[:1000])
                     st.success("分析完成！(Analysis completed!)")
                 except Exception as e:
                     st.error(f"分析失败: {str(e)}")
@@ -509,9 +519,9 @@ st.markdown("""
 欢迎使用透视表与时间序列转换工具！此工具支持以下功能：  
 - **透视表**：将时间序列数据转换为透视表，按时间粒度（15分钟或1小时）聚合数据（平均、最大、最小），支持多种时间格式选择。  
 - **时间序列转换**：将透视表格式数据转换为时间序列，支持CSV和Excel输入。  
-- **风电出力率分析**：分析风电数据，计算各季节（春季、夏季、秋季、冬季）在特定时段（19:00-22:00、11:00-14:00、1:00-4:00）的指定分位出力率，支持多机组数据和不同采样周期（1小时、30分钟、15分钟）。  
+- **风电出力率分析**：分析风电数据，计算各季节（春季、夏季、秋季、冬季、全年）在特定时段（19:00-22:00、11:00-14:00、1:00-4:00）的指定分位出力率，支持多机组数据和不同采样周期（1小时、30分钟、15分钟）。  
 (Welcome to the Pivot and Unpivot Tool! This tool supports the following features:  
 - **Pivot Table**: Convert time series data into pivot tables, aggregating data (average, max, min) by time granularity (15 minutes or 1 hour), with multiple time format options.  
 - **Unpivot Time Series**: Convert pivot table data to time series, supporting CSV and Excel inputs.  
-- **Wind Power Analysis**: Analyze wind power data to calculate percentile power rates for seasons (spring, summer, autumn, winter) in specific time slots (19:00-22:00, 11:00-14:00, 1:00-4:00), supporting multi-unit data and various sampling periods (1 hour, 30 minutes, 15 minutes).)
+- **Wind Power Analysis**: Analyze wind power data to calculate percentile power rates for seasons (spring, summer, autumn, winter, year-round) in specific time slots (19:00-22:00, 11:00-14:00, 1:00-4:00), supporting multi-unit data and various sampling periods (1 hour, 30 minutes, 15 minutes).)
 """)
