@@ -319,13 +319,20 @@ with tab3:
         wind_file = st.file_uploader("上传CSV文件 (Upload CSV File)", type=["csv"], key="wind_file")
         if wind_file:
             try:
+                # 检测分隔符
+                wind_file.seek(0)
+                sample = wind_file.read(1024).decode('utf-8-sig', errors='ignore')
+                wind_file.seek(0)
+                sniffer = csv.Sniffer()
+                delimiter = sniffer.sniff(sample).delimiter
+                
                 # 尝试多种编码
-                encodings = ['gbk', 'utf-8', 'utf-8-sig']
+                encodings = ['utf-8-sig', 'gbk', 'utf-8']
                 df = None
                 for enc in encodings:
                     try:
                         wind_file.seek(0)
-                        df = pd.read_csv(wind_file, encoding=enc)
+                        df = pd.read_csv(wind_file, encoding=enc, sep=delimiter)
                         break
                     except UnicodeDecodeError:
                         continue
@@ -335,10 +342,11 @@ with tab3:
                     raise ValueError("上传的 CSV 文件为空")
                 columns = df.columns.tolist()
                 st.write("检测到的列名：", columns)
+                st.write("原始列名（检查编码问题）：", [repr(col) for col in df.columns])
                 # 显示文件前几行
                 if st.checkbox("显示 CSV 内容调试信息", key="wind_debug"):
                     wind_file.seek(0)
-                    df_debug = pd.read_csv(wind_file, encoding=enc, nrows=5)
+                    df_debug = pd.read_csv(wind_file, encoding=enc, sep=delimiter, nrows=5)
                     st.write("CSV 前5行：", df_debug)
                     if time_col in df_debug.columns:
                         st.write("时间列前5个值：", df_debug[time_col].head().tolist())
@@ -348,7 +356,7 @@ with tab3:
         else:
             columns = []
         
-        time_col = st.selectbox("时间列", columns, key="wind_time_col", help="选择时间戳列（格式如 2023/03/15 19:00:00）")
+        time_col = st.selectbox("时间列", columns, key="wind_time_col", help="选择时间戳列（格式如 2024/01/01 0:00）")
         value_col = st.selectbox("值列（发电量）", columns, key="wind_value_col", help="选择发电量列")
         unit_col = st.selectbox("机组编号列", columns, key="wind_unit_col", help="选择机组编号列")
     
@@ -399,11 +407,15 @@ with tab3:
     if wind_file and time_col and unit_col and columns:
         try:
             wind_file.seek(0)
-            encodings = ['gbk', 'utf-8', 'utf-8-sig']
+            sample = wind_file.read(1024).decode('utf-8-sig', errors='ignore')
+            wind_file.seek(0)
+            sniffer = csv.Sniffer()
+            delimiter = sniffer.sniff(sample).delimiter
+            encodings = ['utf-8-sig', 'gbk', 'utf-8']
             df = None
             for enc in encodings:
                 try:
-                    df = pd.read_csv(wind_file, encoding=enc)
+                    df = pd.read_csv(wind_file, encoding=enc, sep=delimiter)
                     break
                 except UnicodeDecodeError:
                     continue
@@ -442,11 +454,15 @@ with tab3:
             with st.spinner("正在分析数据... (Analyzing data...)"):
                 try:
                     wind_file.seek(0)
-                    encodings = ['gbk', 'utf-8', 'utf-8-sig']
+                    sample = wind_file.read(1024).decode('utf-8-sig', errors='ignore')
+                    wind_file.seek(0)
+                    sniffer = csv.Sniffer()
+                    delimiter = sniffer.sniff(sample).delimiter
+                    encodings = ['utf-8-sig', 'gbk', 'utf-8']
                     df = None
                     for enc in encodings:
                         try:
-                            df = pd.read_csv(wind_file, encoding=enc)
+                            df = pd.read_csv(wind_file, encoding=enc, sep=delimiter)
                             break
                         except UnicodeDecodeError:
                             continue
