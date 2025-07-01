@@ -198,12 +198,15 @@ def calculate_power_rate(df, time_col, value_col, unit_col, value_unit, total_ca
                 top_percentile = np.nan
             
             results.append({
-                '季节': season,
-                '时段': slot,
+                '季节': season.strip(),
+                '时段': slot.strip(),
                 f'{percentile}%概率出力率': top_percentile
             })
     
-    return pd.DataFrame(results)
+    results_df = pd.DataFrame(results)
+    # 确保列名无多余空格
+    results_df.columns = [col.strip() for col in results_df.columns]
+    return results_df
 
 # 主界面
 st.title("透视表与时间序列转换工具 (Pivot and Unpivot Tool)")
@@ -491,7 +494,7 @@ with tab3:
                     st.session_state['wind_df'] = results_df
                     # 调试 CSV 输出
                     if st.checkbox("调试 CSV 输出内容", key="wind_csv_debug"):
-                        csv_debug = results_df.to_csv(index=False, encoding='utf-8-sig')
+                        csv_debug = '\ufeff' + results_df.to_csv(index=False, encoding='utf-8')
                         st.text("CSV 输出内容预览（前1000字符）：")
                         st.text(csv_debug[:1000])
                     st.success("分析完成！(Analysis completed!)")
@@ -504,7 +507,7 @@ with tab3:
             st.session_state['wind_df'].style.format({f'{percentile}%概率出力率': '{:.4f}'}, na_rep='无有效数据'),
             use_container_width=True
         )
-        csv = st.session_state['wind_df'].to_csv(index=False, encoding='utf-8-sig')
+        csv = '\ufeff' + st.session_state['wind_df'].to_csv(index=False, encoding='utf-8')
         st.download_button(
             label="保存结果 (Save Results)",
             data=csv,
