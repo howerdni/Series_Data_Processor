@@ -313,7 +313,6 @@ with tab2:
             key="save_unpivot"
         )
 
-# 风电出力率分析标签页
 with tab3:
     st.header("风电出力率分析")
     
@@ -327,31 +326,33 @@ with tab3:
         wind_file = st.file_uploader("上传 CSV 文件", type=["csv"], key="wind_file")
         if wind_file:
             try:
-                # 检测分隔符
                 wind_file.seek(0)
-                sample = wind_file.read(1024).decode('utf-8-sig', errors='ignore')
-                wind_file.seek(0)
-                sniffer = csv.Sniffer()
-                delimiter = sniffer.sniff(sample).delimiter
-                
-                # 尝试多种编码
                 encodings = ['utf-8-sig', 'gbk', 'utf-8']
                 df = None
+                delimiter = None
                 for enc in encodings:
                     try:
                         wind_file.seek(0)
+                        sample_bytes = wind_file.read(2048)  # 增加到2KB，提高sniff准确性
+                        sample = sample_bytes.decode(enc, errors='strict')  # 用strict，避免ignore导致乱码；错就跳过
+                        sniffer = csv.Sniffer()
+                        delimiter = sniffer.sniff(sample).delimiter
+                        wind_file.seek(0)
                         df = pd.read_csv(wind_file, encoding=enc, sep=delimiter)
+                        # 检查是否解析合理（例如，至少2列，避免wrong sep导致单列）
+                        if len(df.columns) < 2:
+                            raise pd.errors.ParserError("列数太少，可能分隔符错误")
                         break
-                    except UnicodeDecodeError:
+                    except (UnicodeDecodeError, pd.errors.ParserError, csv.Error):
                         continue
                 if df is None:
-                    raise ValueError("无法解析 CSV 文件，请检查文件编码")
+                    raise ValueError("无法解析 CSV 文件，请检查文件编码和分隔符（建议用UTF-8或GBK，逗号分隔）")
                 if df.empty:
                     raise ValueError("上传的 CSV 文件为空")
                 columns = df.columns.tolist()
                 st.write("检测到的列名：", columns)
                 st.write("原始列名（检查编码问题）：", [repr(col) for col in df.columns])
-                # 显示文件前几行
+                # 显示文件前几行（保持原样）
                 if st.checkbox("显示 CSV 内容调试信息", key="wind_debug"):
                     wind_file.seek(0)
                     df_debug = pd.read_csv(wind_file, encoding=enc, sep=delimiter, nrows=5)
